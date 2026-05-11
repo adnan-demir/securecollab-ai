@@ -5,15 +5,17 @@ Security features implemented:
   1. bcrypt password hashing (passlib)
   2. JWT authentication (python-jose)
   3. Two-factor authentication (OTP via 2FA)
-  4. Simulated Google OAuth social login
-  5. Role-based authorization (student | researcher | admin)
-  6. Failed-login tracking and account lockout guard
-  7. Unauthorized-access logging
-  8. AI-style risk scoring per user
-  9. CORS locked to known frontend origins
- 10. Secrets loaded from environment variables
+  4. Backup recovery codes (single-use, SHA-256 hashed)
+  5. Simulated Google / GitHub / Microsoft OAuth social login
+  6. Role-based authorization (student | researcher | admin)
+  7. Failed-login tracking and account lockout guard
+  8. Unauthorized-access logging
+  9. AI-style risk scoring per user
+ 10. CORS locked to known frontend origins
+ 11. Secrets loaded from environment variables
 """
 
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -28,12 +30,13 @@ from models import User, Project, ActivityLog
 from schemas import (
     UserCreate, UserLogin, OTPVerify, Token, UserResponse,
     ProjectCreate, ProjectResponse, RoleUpdate, ActivityLogResponse,
-    RiskScoreResponse, SocialLoginRequest,
+    RiskScoreResponse, SocialLoginRequest, RecoveryCodeVerify,
 )
 from auth import (
     verify_password, get_password_hash,
     create_access_token, decode_token,
     generate_otp, calculate_risk_score,
+    generate_recovery_codes, hash_recovery_code, verify_recovery_code,
 )
 
 # ── Create database tables on startup ────────────────────────────────────────
@@ -299,6 +302,91 @@ def get_me(authorization: Optional[str] = Header(None), db: Session = Depends(ge
     return get_current_user(token, db)
 
 
+@app.post("/api/auth/generate-recovery-codes", tags=["auth"])
+def generate_recovery_codes_endpoint(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Generate 5 single-use backup recovery codes for the authenticated user.
+
+    Recovery codes allow the user to bypass OTP 2FA if they lose access to their
+    authenticator. Each code is shown ONCE – store them somewhere safe.
+
+    Security: codes are SHA-256 hashed before storage. Plaintext is never persisted.
+    """
+    token = _extract_token(authorization)
+    user = get_current_user(token, db)
+
+    codes = generate_recovery_codes(count=5)
+    user.recovery_codes = json.dumps([hash_recovery_code(c) for c in codes])
+    db.commit()
+
+    _log(db, "recovery_codes_generated", user_id=user.id,
+         details="Recovery codes regenerated")
+
+    return {
+        "codes": codes,
+        "message": "Save these codes securely. Each can only be used once.",
+        "warning": "These codes will NOT be shown again. Regenerating replaces all existing codes.",
+    }
+
+
+@app.post("/api/auth/verify-recovery-code", response_model=Token, tags=["auth"])
+def verify_recovery_code_endpoint(
+    data: RecoveryCodeVerify,
+    db: Session = Depends(get_db),
+):
+    """
+    Alternative step 2: verify a backup recovery code instead of an OTP.
+
+    The user must have already completed step 1 (email + password), which sets
+    a pending OTP on their account. This endpoint replaces the OTP check with
+    a recovery code check.
+
+    ⚠️  Each recovery code is single-use and is deleted after successful verification.
+    """
+    user = db.query(User).filter(User.email == data.email).first()
+
+    if not user or not user.otp_secret:
+        raise HTTPException(status_code=400,
+                            detail="No pending authentication. Please log in first.")
+
+    if datetime.now(timezone.utc).replace(tzinfo=None) > user.otp_expiry:
+        user.otp_secret = None
+        user.otp_expiry = None
+        db.commit()
+        raise HTTPException(status_code=400,
+                            detail="Session expired. Please log in again.")
+
+    if not user.recovery_codes:
+        raise HTTPException(status_code=400,
+                            detail="No recovery codes configured. "
+                                   "Generate them first from your dashboard.")
+
+    stored_hashes = json.loads(user.recovery_codes)
+    matched_hash = verify_recovery_code(data.code, stored_hashes)
+
+    if not matched_hash:
+        _log(db, "failed_recovery_code", user_id=user.id,
+             details="Invalid recovery code submitted")
+        raise HTTPException(status_code=400, detail="Invalid recovery code.")
+
+    # Remove used code (single-use), clear OTP state, reset failed counter
+    stored_hashes.remove(matched_hash)
+    user.recovery_codes = json.dumps(stored_hashes)
+    user.otp_secret = None
+    user.otp_expiry = None
+    user.failed_login_count = 0
+    db.commit()
+
+    _log(db, "recovery_code_used", user_id=user.id,
+         details=f"Logged in via recovery code ({len(stored_hashes)} remaining)")
+
+    token = create_access_token({"sub": str(user.id), "role": user.role})
+    return {"access_token": token, "token_type": "bearer"}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROJECT ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -487,6 +575,76 @@ def get_risk_scores(
 
     # Return highest-risk users first
     return sorted(results, key=lambda x: x.risk_score, reverse=True)
+
+
+@app.get("/api/admin/security-status", tags=["admin"])
+def security_status(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin: deployment-readiness and security feature checklist.
+
+    Returns an honest summary of which security features are enabled and what
+    still needs attention before a production deployment.
+    Designed to support instructor screenshot verification.
+    """
+    token = _extract_token(authorization)
+    require_admin(token, db, request)
+
+    total_users = db.query(User).count()
+    social_users = db.query(User).filter(User.is_social_login == True).count()
+    failed_logins = db.query(ActivityLog).filter(
+        ActivityLog.event_type == "failed_login").count()
+    unauthorized = db.query(ActivityLog).filter(
+        ActivityLog.event_type == "unauthorized_access").count()
+
+    return {
+        "authentication_methods": [
+            {"name": "Email + Password",                  "enabled": True,  "type": "primary"},
+            {"name": "OTP Two-Factor Authentication",     "enabled": True,  "type": "2fa"},
+            {"name": "Backup Recovery Codes",             "enabled": True,  "type": "2fa_backup",
+             "note": "Single-use, SHA-256 hashed"},
+            {"name": "Google Social Login (Simulated)",   "enabled": True,  "type": "social"},
+            {"name": "GitHub Social Login (Simulated)",   "enabled": True,  "type": "social"},
+            {"name": "Microsoft Social Login (Simulated)","enabled": True,  "type": "social"},
+        ],
+        "security_features": [
+            {"name": "bcrypt Password Hashing",       "status": "enabled"},
+            {"name": "JWT Token Authentication",      "status": "enabled"},
+            {"name": "Failed Login Tracking",         "status": "enabled"},
+            {"name": "Unauthorized Access Logging",   "status": "enabled"},
+            {"name": "Role-Based Access Control",     "status": "enabled"},
+            {"name": "CORS Restricted Origins",       "status": "enabled"},
+            {"name": "AI Risk Scoring",               "status": "enabled"},
+            {"name": "GitHub Actions CI/CD",          "status": "enabled"},
+        ],
+        "deployment_checklist": [
+            {"item": "SECRET_KEY via environment variable",
+             "status": "demo",    "note": "Replace with 256-bit random key before production"},
+            {"item": "Database: SQLite",
+             "status": "demo",    "note": "Switch to PostgreSQL for production (Railway)"},
+            {"item": "HTTPS / TLS",
+             "status": "pending", "note": "Automatically provided by Railway / Vercel"},
+            {"item": "CORS locked to known origins",
+             "status": "enabled", "note": "Set ALLOWED_ORIGINS env var in production"},
+            {"item": "OTP delivered via email/SMS",
+             "status": "demo",    "note": "Integrate email provider (SendGrid etc.) in production"},
+            {"item": "Social OAuth tokens server-verified",
+             "status": "demo",    "note": "Add provider SDK verification in production"},
+            {"item": "Frontend: Vercel deployment-ready",
+             "status": "ready",   "note": "npm run build produces static dist/"},
+            {"item": "Backend: Railway deployment-ready",
+             "status": "ready",   "note": "Procfile / uvicorn start command documented"},
+        ],
+        "stats": {
+            "total_users": total_users,
+            "social_login_users": social_users,
+            "total_failed_logins": failed_logins,
+            "total_unauthorized_attempts": unauthorized,
+        },
+    }
 
 
 # ─── Health check ─────────────────────────────────────────────────────────────

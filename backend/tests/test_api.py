@@ -287,3 +287,180 @@ class TestSocialLogin:
         # Both should return valid tokens
         assert "access_token" in r1.json()
         assert "access_token" in r2.json()
+
+    def test_github_social_login(self, client):
+        r = client.post("/api/auth/social-login", json={
+            "provider": "github",
+            "email": "ghuser@github.com",
+            "name": "GitHub User",
+            "social_id": "github_demo_001",
+        })
+        assert r.status_code == 200
+        assert "access_token" in r.json()
+
+    def test_microsoft_social_login(self, client):
+        r = client.post("/api/auth/social-login", json={
+            "provider": "microsoft",
+            "email": "msuser@outlook.com",
+            "name": "Microsoft User",
+            "social_id": "microsoft_demo_001",
+        })
+        assert r.status_code == 200
+        assert "access_token" in r.json()
+
+    def test_social_login_records_provider(self, client):
+        """Verify the provider field is stored correctly for GitHub login."""
+        r = client.post("/api/auth/social-login", json={
+            "provider": "github",
+            "email": "ghprov@github.com",
+            "name": "GH Provider Test",
+            "social_id": "gh_prov_999",
+        })
+        assert r.status_code == 200
+        token = r.json()["access_token"]
+        me = client.get("/api/auth/me",
+                        headers={"Authorization": f"Bearer {token}"}).json()
+        assert me["is_social_login"] is True
+        assert me["social_provider"] == "github"
+
+
+# ─── Recovery codes ───────────────────────────────────────────────────────────
+
+class TestRecoveryCodes:
+    def test_generate_recovery_codes_requires_auth(self, client):
+        r = client.post("/api/auth/generate-recovery-codes")
+        assert r.status_code == 401
+
+    def test_generate_recovery_codes_returns_5_codes(self, client):
+        register_user(client, "rc@example.com", "rcuser")
+        token = login_and_get_token(client, "rc@example.com")
+        r = client.post("/api/auth/generate-recovery-codes",
+                        headers=auth_headers(token))
+        assert r.status_code == 200
+        body = r.json()
+        assert "codes" in body
+        assert len(body["codes"]) == 5
+        # Each code should be 10 uppercase alphanumeric chars
+        for code in body["codes"]:
+            assert len(code) == 10
+            assert code.isupper() or code.isdigit() or code.isalnum()
+
+    def test_recovery_code_login_flow(self, client):
+        """Full flow: register → generate codes → login step1 → verify with recovery code."""
+        register_user(client, "rcflow@example.com", "rcflowuser")
+        token = login_and_get_token(client, "rcflow@example.com")
+
+        # Generate recovery codes
+        gen_r = client.post("/api/auth/generate-recovery-codes",
+                            headers=auth_headers(token))
+        assert gen_r.status_code == 200
+        codes = gen_r.json()["codes"]
+
+        # Trigger a new login (step 1) to create a pending OTP
+        login_r = client.post("/api/auth/login", json={
+            "email": "rcflow@example.com",
+            "password": "password123",
+        })
+        assert login_r.status_code == 200
+
+        # Use first recovery code instead of OTP
+        verify_r = client.post("/api/auth/verify-recovery-code", json={
+            "email": "rcflow@example.com",
+            "code": codes[0],
+        })
+        assert verify_r.status_code == 200
+        assert "access_token" in verify_r.json()
+
+    def test_recovery_code_is_single_use(self, client):
+        """A recovery code must be rejected after first use."""
+        register_user(client, "rcsingle@example.com", "rcsingleuser")
+        token = login_and_get_token(client, "rcsingle@example.com")
+
+        gen_r = client.post("/api/auth/generate-recovery-codes",
+                            headers=auth_headers(token))
+        code = gen_r.json()["codes"][0]
+
+        # First login with the code
+        client.post("/api/auth/login", json={
+            "email": "rcsingle@example.com",
+            "password": "password123",
+        })
+        first_use = client.post("/api/auth/verify-recovery-code", json={
+            "email": "rcsingle@example.com",
+            "code": code,
+        })
+        assert first_use.status_code == 200
+
+        # Trigger a second login step
+        client.post("/api/auth/login", json={
+            "email": "rcsingle@example.com",
+            "password": "password123",
+        })
+        # Same code should now be rejected
+        second_use = client.post("/api/auth/verify-recovery-code", json={
+            "email": "rcsingle@example.com",
+            "code": code,
+        })
+        assert second_use.status_code == 400
+
+    def test_invalid_recovery_code_rejected(self, client):
+        register_user(client, "rcbad@example.com", "rcbaduser")
+        token = login_and_get_token(client, "rcbad@example.com")
+
+        client.post("/api/auth/generate-recovery-codes", headers=auth_headers(token))
+
+        client.post("/api/auth/login", json={
+            "email": "rcbad@example.com",
+            "password": "password123",
+        })
+        r = client.post("/api/auth/verify-recovery-code", json={
+            "email": "rcbad@example.com",
+            "code": "NOTACODE99",
+        })
+        assert r.status_code == 400
+
+    def test_recovery_code_without_login_step_rejected(self, client):
+        """Cannot use recovery code if step 1 (password) was not completed."""
+        register_user(client, "rcnologin@example.com", "rcnologinuser")
+        token = login_and_get_token(client, "rcnologin@example.com")
+        gen_r = client.post("/api/auth/generate-recovery-codes",
+                            headers=auth_headers(token))
+        code = gen_r.json()["codes"][0]
+
+        # Do NOT call /login first
+        r = client.post("/api/auth/verify-recovery-code", json={
+            "email": "rcnologin@example.com",
+            "code": code,
+        })
+        assert r.status_code == 400
+
+
+# ─── Security status ──────────────────────────────────────────────────────────
+
+class TestSecurityStatus:
+    def test_admin_can_get_security_status(self, client):
+        register_user(client, "sec_adm@example.com", "secadm", role="admin")
+        token = login_and_get_token(client, "sec_adm@example.com")
+        r = client.get("/api/admin/security-status", headers=auth_headers(token))
+        assert r.status_code == 200
+        body = r.json()
+        assert "authentication_methods" in body
+        assert "security_features" in body
+        assert "deployment_checklist" in body
+        assert "stats" in body
+
+    def test_security_status_shows_all_providers(self, client):
+        register_user(client, "sec_adm2@example.com", "secadm2", role="admin")
+        token = login_and_get_token(client, "sec_adm2@example.com")
+        r = client.get("/api/admin/security-status", headers=auth_headers(token))
+        methods = {m["name"] for m in r.json()["authentication_methods"]}
+        assert any("Google" in m for m in methods)
+        assert any("GitHub" in m for m in methods)
+        assert any("Microsoft" in m for m in methods)
+        assert any("Recovery" in m for m in methods)
+
+    def test_non_admin_blocked_from_security_status(self, client):
+        register_user(client, "sec_stu@example.com", "secstu", role="student")
+        token = login_and_get_token(client, "sec_stu@example.com")
+        r = client.get("/api/admin/security-status", headers=auth_headers(token))
+        assert r.status_code == 403

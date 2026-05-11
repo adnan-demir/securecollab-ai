@@ -4,10 +4,13 @@ Covers:
   - bcrypt password hashing via passlib
   - JWT creation and decoding via python-jose
   - OTP generation for 2FA
+  - Backup recovery codes (SHA-256 hashed, single-use)
   - AI-style risk-score calculation
 """
+import hashlib
 import os
 import random
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -67,6 +70,33 @@ def decode_token(token: str) -> Optional[dict]:
 def generate_otp(length: int = 6) -> str:
     """Generate a numeric OTP for two-factor authentication."""
     return "".join(random.choices(string.digits, k=length))
+
+
+# ─── Recovery code helpers ────────────────────────────────────────────────────
+
+def generate_recovery_codes(count: int = 5) -> list[str]:
+    """
+    Generate N single-use recovery codes.
+    Each code is 10 uppercase alphanumeric characters.
+    Recovery codes are high-entropy random strings, so SHA-256 is acceptable
+    (unlike passwords, they are not user-chosen and cannot be dictionary-attacked).
+    """
+    alphabet = string.ascii_uppercase + string.digits
+    return ["".join(secrets.choice(alphabet) for _ in range(10)) for _ in range(count)]
+
+
+def hash_recovery_code(code: str) -> str:
+    """SHA-256 hash a recovery code for safe storage."""
+    return hashlib.sha256(code.strip().upper().encode()).hexdigest()
+
+
+def verify_recovery_code(plain_code: str, stored_hashes: list[str]) -> str | None:
+    """
+    Check whether plain_code matches any stored hash.
+    Returns the matching hash string if found, else None.
+    """
+    code_hash = hash_recovery_code(plain_code)
+    return code_hash if code_hash in stored_hashes else None
 
 
 # ─── AI Risk Score ────────────────────────────────────────────────────────────

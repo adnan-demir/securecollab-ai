@@ -46,6 +46,11 @@ class SocialLoginRequest(BaseModel):
     social_id: str
 
 
+class RecoveryCodeVerify(BaseModel):
+    email: str
+    code: str
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str

@@ -2,8 +2,10 @@
  * Dashboard – personalized home page for authenticated users.
  * Displays user info, role-specific guidance, and quick navigation.
  */
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import api from '../api/client'
 
 const ROLE_CONFIG = {
   student: {
@@ -39,6 +41,77 @@ const QUICK_LINKS = [
   { to: '/projects', icon: '📁', label: 'My Projects', desc: 'View and manage research projects' },
   { to: '/admin',    icon: '⚙️', label: 'Admin Panel', desc: 'Users, roles, and security logs', adminOnly: true },
 ]
+
+function RecoveryCodesPanel() {
+  const [codes, setCodes]     = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState('')
+
+  const generate = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const { data } = await api.post('/api/auth/generate-recovery-codes')
+      setCodes(data.codes)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to generate codes.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 card border border-purple-200 bg-purple-50">
+      <h3 className="font-bold text-purple-900 mb-1 flex items-center gap-2">
+        <svg className="w-5 h-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+            d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0
+               01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+        </svg>
+        Backup Recovery Codes
+      </h3>
+      <p className="text-xs text-purple-700 mb-3">
+        Generate single-use recovery codes to bypass OTP 2FA if you lose access
+        to your authenticator. Store them somewhere safe — they are shown only once.
+      </p>
+
+      {error && (
+        <p className="text-xs text-red-600 mb-2">{error}</p>
+      )}
+
+      {codes ? (
+        <div>
+          <div className="mb-2 p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-800 font-semibold">
+            Save these codes now — they will NOT be shown again.
+          </div>
+          <div className="grid grid-cols-5 gap-2 mb-3">
+            {codes.map((c, i) => (
+              <code key={i} data-testid={`recovery-code-${i}`}
+                className="bg-white border border-purple-300 rounded-lg px-2 py-1.5
+                           text-xs font-mono text-purple-900 text-center tracking-wider">
+                {c}
+              </code>
+            ))}
+          </div>
+          <button onClick={() => setCodes(null)}
+            className="text-xs text-purple-600 hover:underline">
+            Done – hide codes
+          </button>
+        </div>
+      ) : (
+        <button
+          data-testid="generate-recovery-codes-btn"
+          onClick={generate}
+          disabled={loading}
+          className="text-sm bg-purple-600 hover:bg-purple-700 text-white font-semibold
+                     px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+        >
+          {loading ? 'Generating…' : 'Generate Recovery Codes'}
+        </button>
+      )}
+    </div>
+  )
+}
 
 export default function Dashboard() {
   const { user } = useAuth()
@@ -109,8 +182,11 @@ export default function Dashboard() {
           ))}
       </div>
 
+      {/* Recovery codes (only for non-social-login users who use 2FA) */}
+      {!user.is_social_login && <RecoveryCodesPanel />}
+
       {/* Security info */}
-      <div className="mt-8 card border border-gray-200">
+      <div className="mt-6 card border border-gray-200">
         <h3 className="font-bold text-gray-800 mb-3 flex items-center gap-2">
           <svg className="w-5 h-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}

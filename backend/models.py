@@ -26,6 +26,9 @@ class User(Base):
     otp_secret = Column(String, nullable=True)
     otp_expiry = Column(DateTime, nullable=True)
 
+    # Backup recovery codes: JSON list of SHA-256 hashed single-use codes
+    recovery_codes = Column(Text, nullable=True)
+
     # Security tracking for AI risk scoring
     failed_login_count = Column(Integer, default=0)
     last_failed_login = Column(DateTime, nullable=True)

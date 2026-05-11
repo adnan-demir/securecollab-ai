@@ -9,7 +9,113 @@
 import { useState, useEffect, useCallback } from 'react'
 import api from '../api/client'
 
-const TABS = ['Users', 'Activity Log', 'AI Risk Scores']
+// ─── Security Dashboard tab ───────────────────────────────────────────────────
+
+function SecurityTab() {
+  const [status, setStatus]   = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.get('/api/admin/security-status')
+      .then(({ data }) => setStatus(data))
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div className="py-10 text-center text-gray-400">Loading security status…</div>
+  if (!status)  return <div className="py-10 text-center text-red-400">Failed to load status.</div>
+
+  const statusColor = (s) => {
+    if (s === 'enabled' || s === 'ready')  return 'bg-green-100 text-green-700'
+    if (s === 'demo')    return 'bg-amber-100 text-amber-700'
+    if (s === 'pending') return 'bg-blue-100 text-blue-700'
+    return 'bg-gray-100 text-gray-600'
+  }
+
+  return (
+    <div className="space-y-6" data-testid="security-dashboard">
+
+      {/* Disclaimer */}
+      <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
+        <strong>Deployment-Readiness Checklist</strong> — This dashboard shows which security
+        features are active and what needs attention before a production deployment.
+        Items marked <em>demo</em> are functional for development but require additional
+        configuration for live deployment.
+      </div>
+
+      {/* Stats row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { label: 'Total Users',         value: status.stats.total_users,              color: 'text-blue-600' },
+          { label: 'Social Login Users',  value: status.stats.social_login_users,       color: 'text-indigo-600' },
+          { label: 'Failed Logins',       value: status.stats.total_failed_logins,      color: 'text-red-600' },
+          { label: 'Unauthorized Attempts', value: status.stats.total_unauthorized_attempts, color: 'text-orange-600' },
+        ].map((s) => (
+          <div key={s.label} className="card text-center border border-gray-100">
+            <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
+            <p className="text-xs text-gray-500 mt-1">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Authentication methods */}
+      <div>
+        <h3 className="font-bold text-gray-800 mb-3">Authentication Methods</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {status.authentication_methods.map((m) => (
+            <div key={m.name}
+              className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-xl">
+              <div>
+                <span className="text-sm font-medium text-gray-800">{m.name}</span>
+                {m.note && <span className="ml-2 text-xs text-gray-400">— {m.note}</span>}
+              </div>
+              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full
+                ${m.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                {m.enabled ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Security features */}
+      <div>
+        <h3 className="font-bold text-gray-800 mb-3">Security Features</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {status.security_features.map((f) => (
+            <div key={f.name}
+              className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-xl">
+              <span className="text-sm font-medium text-gray-800">{f.name}</span>
+              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColor(f.status)}`}>
+                {f.status}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Deployment checklist */}
+      <div>
+        <h3 className="font-bold text-gray-800 mb-3">Deployment Checklist</h3>
+        <div className="space-y-2">
+          {status.deployment_checklist.map((d) => (
+            <div key={d.item}
+              className="flex items-start gap-3 p-3 bg-white border border-gray-200 rounded-xl">
+              <span className={`mt-0.5 text-xs font-semibold px-2 py-0.5 rounded-full shrink-0 ${statusColor(d.status)}`}>
+                {d.status}
+              </span>
+              <div>
+                <p className="text-sm font-medium text-gray-800">{d.item}</p>
+                {d.note && <p className="text-xs text-gray-500 mt-0.5">{d.note}</p>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const TABS = ['Users', 'Activity Log', 'AI Risk Scores', 'Security Dashboard']
 const ROLES = ['student', 'researcher', 'admin']
 
 const ROLE_BADGE = {
@@ -332,6 +438,7 @@ export default function Admin() {
         {activeTab === 0 && <UsersTab />}
         {activeTab === 1 && <ActivityTab />}
         {activeTab === 2 && <RiskTab />}
+        {activeTab === 3 && <SecurityTab />}
       </div>
     </div>
   )
